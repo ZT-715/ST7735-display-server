@@ -1,15 +1,15 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include <unistd.h>
-#include <netinet/in.h>
-#include <sys/socket.h>
-#include <poll.h>
+#include <string.h>
+
 #include <time.h>
 
+#include <curl/curl.h>
+
 #define MAX_DIGITS 10
-#define PKT_BUFFER_SIZE 256
-#define PORT 9123
-#define MAX_CLIENTS 20
+// #define PKT_BUFFER_SIZE 256
+// #define PORT 9123
+// #define MAX_CLIENTS 20
 
 typedef struct received_data_parsed {
     int id;
@@ -146,142 +146,77 @@ void print_table(packet_t packets[2]) {
     fflush(stdout); // Ensure output is immediately written to the display
 }
 
+/**
+ * Appends a URL-encoded key-value pair to a string.
+ * This function correctly handles reallocating memory and adding '&' only when needed.
+ */
+static int data_append(char** string_source, const char *name, const char *field) {
+    char *escaped_field = curl_easy_escape(NULL, field, 0);
+    if (!escaped_field) {
+        return 0;
+    }
+
+    size_t source_len = strlen(*string_source);
+
+    // Determine the separator: "" for the first pair, "&" for subsequent pairs
+    const char* separator = (source_len > 0) ? "&" : "";
+
+    // Calculate the length of the new part: "separator" + "name" + "=" + "escaped_field"
+    size_t part_len = strlen(separator) + strlen(name) + 1 + strlen(escaped_field);
+
+    // Reallocate memory
+    char *new_string = realloc(*string_source, source_len + part_len + 1);
+    if (!new_string) {
+        fprintf(stderr, "realloc() failed\n");
+        curl_free(escaped_field);
+        return 0;
+    }
+
+    // Append the new part
+    sprintf(new_string + source_len, "%s%s=%s", separator, name, escaped_field);
+
+    // Update the original pointer
+    *string_source = new_string;
+
+    curl_free(escaped_field);
+    return 1;
+}
 
 int main(void) {
-    // Cria uma variável para o file descriptor do socket
-    static int server_fd, new_socket;
-    // estrutura para endereço inter-usuário (internet)
-    struct sockaddr_in address;
+    CURL *curl = curl_easy_init();
+    CURLcode res;
 
-    // Atribui a 'server_fd' um descritor de arquivo referente a um socket
-    // para conexão no domínio de endereços da família do protocolo de
-    // InterNET v4 (IPv4) com sockets do tipo 'stream', que criam uma
-    // conexão com outro socket, assim como utilizado no TCP. Com o parametro
-    // protocolo definido como 0, o sistema supõe automaticamente TCP com
-    // base no tipo e domínio.
-    if ((server_fd = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
-        // Se socket() retornar erro (menor que 0), perror
-        // imprime em stderr a mensagem passada, seguido de
-        // uma descrição do erro definido em 'errno' por socket().
-        perror("socket failed");
+    if(!curl) {
+        perror("curl_easy_init");
         exit(EXIT_FAILURE);
     }
 
-    // Option '1' em setsockopt() define configurações passadas como ativas
-    int opt = 1;
-    socklen_t addrlen = sizeof(address);
-    // setsockopt() recebe um file descriptor, o nível da configuração
-    // (SOL = SOcket Level), e as configurações a serem alteradas para
-    // o estado de opt, no caso, REUSEADDR e REUSEPORT.
-    if (setsockopt(server_fd, SOL_SOCKET,
-                   SO_REUSEADDR | SO_REUSEPORT, &opt,
-                   sizeof(opt))) {
-        perror("setsockopt");
-        exit(EXIT_FAILURE);
-    }
-    // Define estrutura de endereço para o socket
-    //     Address Family é InterNET protocol v4 (IPV4)
-    //     Socket Address é qualquer interface disponível (localhost e outros)
-    //     Porta para é 'PORT', onde hton converte de um endereço no formato
-    // utilizado pelo host para o padrão de rede (network)
-    address.sin_family = AF_INET;
-    address.sin_addr.s_addr = INADDR_ANY;
-    address.sin_port = htons(PORT);
-
-    // Realiza o bind do socket de 'server_fd' para o endereço definido em 'address'
-    if (bind(server_fd, (struct sockaddr*)&address,
-             sizeof(address))
-        < 0) {
-        perror("bind failed");
-        exit(EXIT_FAILURE);
+    // strdup to create heap-allocated string is safer than malloc
+    char *query = strdup("");
+    if (!query) {
+        perror("strdup");
+        return EXIT_FAILURE;
     }
 
-    // Abre (começa 'ouvir') porta definida em 'server_fd' e cria backlog
-    // para conexões de tamanho 3
-    if (listen(server_fd, 3) < 0) {
-        perror("listen");
-        exit(EXIT_FAILURE);
-    }
-  // Array to hold the last two unique packets for display. Initialize to zero.
-    packet_t last_packets[2] = {{0}, {0}};
+    // Data fields
+    data_append(&query, "db", "embarcados2025");
+    data_append(&query, "q", "SELECT * FROM sensor");
 
-    // Array of pollfd structures. Size is max clients + 1 for the listening socket.
-    struct pollfd fds[MAX_CLIENTS + 1];
-    int nfds = 1; // Current number of file descriptors in the array
+    printf("http://192.168.1.11:8086/query\?pretty=true&u=embarcados&p=embarcados\n");
+    printf("%s\n", query);
 
-    // Initialize the polling array with the listening socket
-    fds[0].fd = server_fd;
-    fds[0].events = POLLIN; // Monitor for incoming connection requests
+    // Setup URL
+    curl_easy_setopt(curl, CURLOPT_URL, "http://192.168.1.11:8086/query\?pretty=true&u=embarcados&p=embarcados");
+    // curl_easy_setopt(curl, CURLOPT_POSTFIELDS, "db=embarcados2025&q=SELECT+%2A+FROM+sensor");
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, query);
 
-    print_table(last_packets); // Initial print of the empty table
+    // Request
+    res = curl_easy_perform(curl);
 
-    // --- MAIN SERVER LOOP ---
-    while (1) {
-        // poll() waits for an event on one of the sockets. Timeout is -1 (infinite).
-        int ret = poll(fds, nfds, -1);
-        if (ret < 0) {
-            perror("poll error");
-            break;
-        }
-
-        // New connections ---
-        if (fds[0].revents & POLLIN) {
-            if ((new_socket = accept(server_fd, (struct sockaddr*)&address, &addrlen)) < 0) {
-                perror("accept");
-            } else {
-                if (nfds == MAX_CLIENTS) {
-                    for (int i = MAX_CLIENTS; i > MAX_CLIENTS/2; i--) {
-                        close(fds[i].fd);
-                        fds[i].fd = -1;
-                        fds[i].events = 0;
-                        nfds--;
-                    }
-                }
-                fds[nfds].fd = new_socket;
-                fds[nfds].events = POLLIN;
-                nfds++;
-            }
-        }
-
-        // Handle data
-        for (int i = 1; i < nfds; i++) {
-            if (fds[i].revents & POLLIN) {
-                char packet_buffer[PKT_BUFFER_SIZE] = {0};
-                ssize_t status_read = read(fds[i].fd, packet_buffer, PKT_BUFFER_SIZE - 1);
-
-                if (status_read > 0) {
-                    packet_t new_packet = parse_packet_string(packet_buffer, status_read);
-                    new_packet.timestamp = time(NULL); // Add timestamp on arrival
-
-                    if (new_packet.id > 0) {
-                        // SWAP LOGIC: If the new packet's ID is different from the last one,
-                        // move the current last one to the 'previous' slot (left column).
-                        if (new_packet.id != last_packets[0].id) {
-                            last_packets[1] = last_packets[0];
-                        }
-                        // The new packet always becomes the 'last' one (right column).
-                        last_packets[0] = new_packet;
-                        print_table(last_packets);
-                    }
-                    send(fds[i].fd, "OK\n", 3, 0); // Acknowledge receipt
-
-                } else {
-                    // If read returns 0, the client has closed the connection.
-                    // If read returns < 0, an error occurred.
-                    close(fds[i].fd);
-                    // Remove the client from the poll array by replacing it with the last one.
-                    fds[i] = fds[nfds - 1];
-                    nfds--;
-                    i--; // Decrement 'i' to re-check the fd that was just moved.
-                }
-            }
-        }
+    if (res != CURLE_OK) {
+        fprintf(stderr, "curl_easy_perform(): %s\n", curl_easy_strerror(res));
     }
 
-    // Close all sockets
-    for (int i = 0; i < nfds; i++) {
-        close(fds[i].fd);
-    }
-
-    return 0;
+    free(query);
+    curl_easy_cleanup(curl);
 }
