@@ -1,15 +1,34 @@
+#define _DEFAULT_SOURCE
+
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include <time.h>
 
+// sudo apt install libcurl4-openssl-dev
+// add -lcurl to linker flags
 #include <curl/curl.h>
 
-#define MAX_DIGITS 10
+// sudo apt install libcjson1 libcjson-dev
+// add -lcjson to linker flag
+#include <cjson/cJSON.h> // Inclui o header da cJSON
+
+// Compile
+// gcc main_influx.c -o server_influx.o -lcurl -lcjson -std=c99
+
+// #define MAX_DIGITS 10
 // #define PKT_BUFFER_SIZE 256
 // #define PORT 9123
 // #define MAX_CLIENTS 20
+
+
+typedef enum {
+    ID_UNKNOWN = 0, // Um valor padrão para sensores não reconhecidos
+    ID_AHT10   = 1,
+    ID_BMP280  = 2
+} sensor_id_t;
 
 typedef struct received_data_parsed {
     int id;
@@ -19,71 +38,26 @@ typedef struct received_data_parsed {
     time_t timestamp;
 } packet_t;
 
+
 /**
- * @brief Parses a string packet into a packet_t structure.
+ * @brief Converte o nome de um sensor (string) para seu ID numérico (enum).
  *
- * @param packet The raw character buffer received from the socket.
- * @param length The length of the data in the buffer.
- * @return A packet_t struct with the parsed values.
+ * @param name A string com o nome do sensor (ex: "AHT10").
+ * @return O valor do enum correspondente (ex: ID_AHT10) ou ID_UNKNOWN.
  */
-packet_t parse_packet_string(const char* const packet, const int length) {
-    char ch = ' ';
-    char lead = ' ';
-    char id[MAX_DIGITS] = {'\0'},
-        temperature[MAX_DIGITS] = {'\0'},
-        humidity[MAX_DIGITS] = {'\0'},
-        pressure[MAX_DIGITS] = {'\0'};
-    int idx_id = 0, idx_temp = 0, idx_hum = 0, idx_press = 0;
-    for (int i = 0; i < length; i++) {
-        ch = packet[i];
-        switch (ch) {
-            case('I'):
-            case('T'):
-            case('H'):
-            case('P'):
-                lead = ch;
-                break;
-            case('0'):
-            case('1'):
-            case('2'):
-            case('3'):
-            case('4'):
-            case('5'):
-            case('6'):
-            case('7'):
-            case('8'):
-            case('9'):
-            case('.'):
-	    case('-'):
-                if (lead == 'I' && idx_id < MAX_DIGITS - 2) {
-                    id[idx_id] = ch;
-                    idx_id++;
-                }
-                else if (lead == 'T' && idx_temp < MAX_DIGITS - 2) {
-                    temperature[idx_temp] = ch;
-                    idx_temp++;
-                }
-                else if (lead == 'H' && idx_hum < MAX_DIGITS - 2) {
-                    humidity[idx_hum] = ch;
-                    idx_hum++;
-                }
-                else if (lead == 'P' && idx_press < MAX_DIGITS - 2) {
-                    pressure[idx_press] = ch;
-                    idx_press++;
-                }
-            default:
-                break;
-        }
+sensor_id_t get_sensor_id_from_name(const char* name) {
+    if (name == NULL) {
+        return ID_UNKNOWN;
     }
-    // convert stod()
-    packet_t result = {0};
-    result.id = atoi(id);
-    result.temperature = atof(temperature);
-    result.humidity = atof(humidity);
-    result.pressure = atof(pressure);
-    result.timestamp = time(NULL);
-    return result;
+    if (strcmp(name, "AHT10") == 0) {
+        return ID_AHT10;
+    }
+    if (strcmp(name, "BMP280") == 0) {
+        return ID_BMP280;
+    }
+    return ID_UNKNOWN; // Retorna 0 se o nome não for reconhecido
 }
+
 
 /**
  * @brief Clears the console and prints the formatted data table for a 20x16 display.
@@ -122,8 +96,8 @@ void print_table(packet_t packets[2]) {
     printf("         |          \n");
 
     // Pressure row
-    if (prev->pressure != 0.0f) printf("P %4.1f  |", prev->pressure); else printf("P        |");
-    if (last->pressure != 0.0f) printf(" %4.1f kPa\n", last->pressure); else printf("      kPa\n");
+    if (prev->pressure != 0.0f) printf("P %4.2f |", prev->pressure); else printf("P        |");
+    if (last->pressure != 0.0f) printf(" %3.1f kPa\n", last->pressure); else printf("      kPa\n");
     printf("         |          \n");
 
     printf("–––––––––|––––––––––\n\nÚltimo update:\n\n");
@@ -182,41 +156,149 @@ static int data_append(char** string_source, const char *name, const char *field
     return 1;
 }
 
+// Estrutura auxiliar para guardar a resposta da libcurl em memória
+struct MemoryStruct {
+    char *memory;
+    size_t size;
+};
+
+// Função de callback que a libcurl usa para salvar os dados recebidos na memória.
+static size_t WriteMemoryCallback(void *contents, size_t size, size_t nmemb, void *userp) {
+    size_t realsize = size * nmemb;
+    struct MemoryStruct *mem = (struct MemoryStruct *)userp;
+
+    char *ptr = realloc(mem->memory, mem->size + realsize + 1);
+    if(ptr == NULL) {
+        /* out of memory! */
+        printf("not enough memory (realloc returned NULL)\n");
+        return 0;
+    }
+
+    mem->memory = ptr;
+    memcpy(&(mem->memory[mem->size]), contents, realsize);
+    mem->size += realsize;
+    mem->memory[mem->size] = 0;
+
+    return realsize;
+}
+
 int main(void) {
     CURL *curl = curl_easy_init();
     CURLcode res;
+    struct MemoryStruct chunk;
+    chunk.memory = malloc(1); // Será expandido conforme necessário
+    chunk.size = 0;
 
     if(!curl) {
         perror("curl_easy_init");
         exit(EXIT_FAILURE);
     }
 
-    // strdup to create heap-allocated string is safer than malloc
     char *query = strdup("");
     if (!query) {
         perror("strdup");
         return EXIT_FAILURE;
     }
 
-    // Data fields
     data_append(&query, "db", "embarcados2025");
-    data_append(&query, "q", "SELECT * FROM sensor");
+    data_append(&query, "q", "SELECT last(tempoamostra) as timestamp, last(pressao) as pressure, last(temperatura) as temperature, last(umidade) as humidity FROM sensor GROUP BY ID");
 
-    printf("http://192.168.1.11:8086/query\?pretty=true&u=embarcados&p=embarcados\n");
-    printf("%s\n", query);
-
-    // Setup URL
-    curl_easy_setopt(curl, CURLOPT_URL, "http://192.168.1.11:8086/query\?pretty=true&u=embarcados&p=embarcados");
-    // curl_easy_setopt(curl, CURLOPT_POSTFIELDS, "db=embarcados2025&q=SELECT+%2A+FROM+sensor");
+    // Configura a requisição libcurl
+    curl_easy_setopt(curl, CURLOPT_URL, "http://192.168.1.11:8086/query?pretty=false&u=embarcados&p=embarcados");
     curl_easy_setopt(curl, CURLOPT_POSTFIELDS, query);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteMemoryCallback);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void *)&chunk);
 
-    // Request
+    // Executa a requisição
     res = curl_easy_perform(curl);
-
     if (res != CURLE_OK) {
         fprintf(stderr, "curl_easy_perform(): %s\n", curl_easy_strerror(res));
     }
 
     free(query);
     curl_easy_cleanup(curl);
+
+    cJSON *root = cJSON_Parse(chunk.memory);
+    if (root == NULL) {
+        const char *error_ptr = cJSON_GetErrorPtr();
+        if (error_ptr != NULL) {
+            fprintf(stderr, "Erro no parsing do JSON: %s\n", error_ptr);
+        }
+        free(chunk.memory);
+        return 1;
+    }
+
+    cJSON *results = cJSON_GetObjectItemCaseSensitive(root, "results");
+    cJSON *first_result = cJSON_GetArrayItem(results, 0);
+    cJSON *series = cJSON_GetObjectItemCaseSensitive(first_result, "series");
+
+    int series_count = cJSON_GetArraySize(series);
+    if (series_count == 0) {
+        printf("Nenhuma série de dados retornada.\n");
+        cJSON_Delete(root);
+        free(chunk.memory);
+        return 0;
+    }
+
+    packet_t **packet_list = malloc(sizeof(packet_t*) * series_count);
+
+    cJSON *s;
+    int i = 0;
+    cJSON_ArrayForEach(s, series) {
+        packet_list[i] = malloc(sizeof(packet_t));
+        packet_t *current_packet = packet_list[i];
+        memset(current_packet, 0, sizeof(packet_t));
+
+        // Atribui o ID para o pacote recebido
+        cJSON* tags = cJSON_GetObjectItemCaseSensitive(s, "tags");
+        cJSON* id_tag_json = cJSON_GetObjectItemCaseSensitive(tags, "ID");
+        if (cJSON_IsString(id_tag_json) && (id_tag_json->valuestring != NULL)) {
+            char *sensor_name = id_tag_json->valuestring;
+            current_packet->id = get_sensor_id_from_name(sensor_name);
+        } else {
+            current_packet->id = ID_UNKNOWN;
+        }
+
+        cJSON *columns = cJSON_GetObjectItemCaseSensitive(s, "columns");
+        cJSON *values = cJSON_GetObjectItemCaseSensitive(s, "values");
+        cJSON *first_value_set = cJSON_GetArrayItem(values, 0);
+
+        int col_idx = 0;
+        cJSON *col_name_json;
+        cJSON_ArrayForEach(col_name_json, columns) {
+            char *col_name = cJSON_GetStringValue(col_name_json);
+            cJSON *value = cJSON_GetArrayItem(first_value_set, col_idx);
+
+            if (strcmp(col_name, "timestamp") == 0 && !cJSON_IsNull(value)) {
+                current_packet->timestamp = (time_t)cJSON_GetNumberValue(value);
+            } else if (strcmp(col_name, "pressure") == 0 && !cJSON_IsNull(value)) {
+                current_packet->pressure = (float)cJSON_GetNumberValue(value);
+            } else if (strcmp(col_name, "temperature") == 0 && !cJSON_IsNull(value)) {
+                current_packet->temperature = (float)cJSON_GetNumberValue(value);
+            } else if (strcmp(col_name, "humidity") == 0 && !cJSON_IsNull(value)) {
+                current_packet->humidity = (float)cJSON_GetNumberValue(value);
+            }
+            col_idx++;
+        }
+        i++;
+    }
+
+    packet_t packets_to_print[2] = {0};
+    if (series_count > 0) {
+        packets_to_print[0] = *packet_list[0];
+    }
+    if (series_count > 1) {
+        packets_to_print[1] = *packet_list[1];
+    }
+    print_table(packets_to_print);
+
+    cJSON_Delete(root);
+
+    for (int j = 0; j < series_count; j++) {
+        free(packet_list[j]);
+    }
+    free(packet_list);
+    free(chunk.memory);
+
+    return 0;
 }
