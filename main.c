@@ -81,8 +81,28 @@ void print_table(packet_t packets[2]) {
 
     printf("–––––––––|––––––––––\n");
     // ID row
-    if (prev->id > 0) printf("ID   %3i |", prev->id); else printf("ID       |");
-    if (last->id > 0) printf("     %4i\n", last->id); else printf("         \n");
+    switch (prev->id) {
+        case ID_AHT10:
+            printf("ID AHT10 |");
+            break;
+        case ID_BMP280:
+            printf("ID BMP280|");
+            break;
+        default:
+            printf("ID       |");
+            break;
+    };
+    switch (last->id) {
+        case ID_AHT10:
+            printf(" AHT10   \n");
+            break;
+        case ID_BMP280:
+            printf(" BMP280  \n");
+            break;
+        default:
+            printf("         \n");
+            break;
+    }
     printf("–––––––––|––––––––––\n");
 
     // Temperature row
@@ -96,26 +116,38 @@ void print_table(packet_t packets[2]) {
     printf("         |          \n");
 
     // Pressure row
-    if (prev->pressure != 0.0f) printf("P %4.2f |", prev->pressure); else printf("P        |");
-    if (last->pressure != 0.0f) printf(" %3.1f kPa\n", last->pressure); else printf("      kPa\n");
+    if (prev->pressure != 0.0f) printf("P %4.0f |", prev->pressure); else printf("P        |");
+    if (last->pressure != 0.0f) printf(" %3.0f hPa\n", last->pressure); else printf("      hPa\n");
     printf("         |          \n");
 
     printf("–––––––––|––––––––––\n\nÚltimo update:\n\n");
 
     // Timestamps
     char time_str[9]; // For HH:MM:SS\0
-    if (last->id > 0) {
-        strftime(time_str, sizeof(time_str), "%H:%M:%S", localtime(&last->timestamp));
-        printf("ID %2i:   %s\n", last->id, time_str);
-    } else {
-        printf("ID --:   Aguardando\n");
-    }
+    strftime(time_str, sizeof(time_str), "%H:%M:%S", localtime(&prev->timestamp));
+    switch (prev->id) {
+        case ID_AHT10:
+            printf(" AHT10  %s\n", time_str);
+            break;
+        case ID_BMP280:
+            printf(" BPM280 %s\n", time_str);
+            break;
+        default:
+            printf(" ID %2i:  %s\n", prev->id, time_str);
+            break;
+    };
+    strftime(time_str, sizeof(time_str), "%H:%M:%S", localtime(&last->timestamp));
+    switch (last->id) {
+        case ID_AHT10:
+            printf(" AHT10  %s\n", time_str);
+            break;
+        case ID_BMP280:
+            printf(" BPM280 %s\n", time_str);
+            break;
+        default:
+            printf(" ID %2i:  %s\n", prev->id, time_str);
+            break;
 
-    if (prev->id > 0) {
-        strftime(time_str, sizeof(time_str), "%H:%M:%S", localtime(&prev->timestamp));
-        printf("ID %2i:   %s\n", prev->id, time_str);
-    } else {
-        printf("ID --:   Aguardando\n");
     }
     fflush(stdout); // Ensure output is immediately written to the display
 }
